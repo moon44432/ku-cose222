@@ -10,6 +10,7 @@
 //  Changes:
 //  + Add additional instruction support
 //  + Add pipelining
+//  + Add control hazard detection & handling logic
 //  * Code refactoring
 
 
@@ -278,14 +279,11 @@ module datapath(input         clk, reset,
   reg  [31:0] alusrc2;
   wire [31:0] branch_dest, jal_dest, jalr_dest; // [Seunggi Moon] Edit: Add jalr destination
   wire		    Nflag, Zflag, Cflag, Vflag;
-  wire		    f3beq, f3blt, f3bgeu; // [Seunggi Moon] Edit: Add additional wire for bgeu
+  wire		    f3beq, f3blt, f3bgeu, f3bne; // [Seunggi Moon] Edit: Add additional wire for bgeu, bne
   wire		    beq_taken;
   wire		    blt_taken;
   wire		    bgeu_taken; // [Seunggi Moon] Edit: Add bgeu_taken
-
-  assign f3beq  = (funct3 == 3'b000);
-  assign f3blt  = (funct3 == 3'b100);
-  assign f3bgeu = (funct3 == 3'b111); // [Seunggi Moon] Edit: Assign funct3 value for BGEU
+  wire		    bne_taken; // [Seunggi Moon] Edit: Add bne_taken
 
   // [Seunggi Moon] Edit: Add additional wires/flip-flops for pipelining
 
@@ -305,7 +303,9 @@ module datapath(input         clk, reset,
   reg  [4:0]  IDEX_rs1;
   reg  [4:0]  IDEX_rs2;
   reg  [4:0]  IDEX_rd;
+  reg  [2:0]  IDEX_funct3;
   reg         IDEX_auipc, IDEX_lui, IDEX_alusrc, IDEX_branch, IDEX_jal, IDEX_jalr;
+  reg         IDEX_beq_taken, IDEX_blt_taken, IDEX_bgeu_taken, IDEX_bne_taken; // [Seunggi Moon] Edit: For detecting control hazard
   reg         IDEX_memtoreg;
   reg         IDEX_memwrite;
   reg         IDEX_regwrite;
@@ -334,10 +334,10 @@ module datapath(input         clk, reset,
   wire [31:0] rfrs2_data;
   
   // Stall signal
-  wire stall;
-  // Implement stall logic (Data hazard detection)
-  assign stall = ((rs1 == IDEX_rd) && (IDEX_opcode == `OP_I_LOAD) && (IDEX_rd != 5'b00000))
-               + ((rs2 == IDEX_rd) && (IDEX_opcode == `OP_I_LOAD) && (IDEX_rd != 5'b00000));
+  wire        stall;
+
+  // Flush signal
+  wire        flush;
 
 
 
@@ -348,13 +348,13 @@ module datapath(input         clk, reset,
   //
   // PC (Program Counter) logic
   //
-  assign beq_taken  =  branch & f3beq & Zflag;
-  assign blt_taken  =  branch & f3blt & (Nflag != Vflag);
-  assign bgeu_taken =  branch & f3bgeu & Cflag; // [Seunggi Moon] Edit: Condition to detect BGEU
 
-  assign branch_dest = (IFID_pc + se_br_imm);
-  assign jal_dest 	= (IFID_pc + se_jal_imm);
-  assign jalr_dest = {EXMEM_aluout[31:1],1'b0}; // [Seunggi Moon] Edit: Multiply byte distance by 2 (setting LSB as 0), according to RISC-V design
+  // [Seunggi Moon] Edit: Use EX stage registers to calculate branch destinations
+  assign branch_dest = (IDEX_pc + IDEX_se_br_imm);
+  assign jal_dest 	= (IDEX_pc + IDEX_se_jal_imm);
+  assign jalr_dest = (IDEX_rs1_data + IDEX_se_imm_itype);
+  
+  // assign jalr_dest = {aluout[31:1],1'b0}; // [Seunggi Moon] Edit: Multiply byte distance by 2 (setting LSB as 0), according to RISC-V design
 
   always @(posedge clk, posedge reset)
   begin
@@ -363,12 +363,12 @@ module datapath(input         clk, reset,
 	  begin
       if (stall) // [Seunggi Moon] Edit: add stall condition
         pc <= #`simdelay pc;
-      // [Seunggi Moon] Edit: add condition for bgeu
-	    else if (beq_taken | blt_taken | bgeu_taken) // branch_taken
+      // [Seunggi Moon] Edit: add condition for bgeu, use EX stage registers
+	    else if (IDEX_beq_taken | IDEX_blt_taken | IDEX_bgeu_taken | IDEX_bne_taken) // branch_taken
 				pc <= #`simdelay branch_dest;
-		  else if (jal) // jal
+		  else if (IDEX_jal) // jal
 				pc <= #`simdelay jal_dest;
-      else if (jalr)  // jalr
+      else if (IDEX_jalr)  // jalr
 				pc <= #`simdelay jalr_dest; // [Seunggi Moon] Edit: handle JALR
 		  else 
 				pc <= #`simdelay (pc + 4);
@@ -382,6 +382,11 @@ module datapath(input         clk, reset,
     begin
       IFID_inst <= #`simdelay IFID_inst;
       IFID_pc <= #`simdelay IFID_pc;
+    end
+    else if (flush) // Add flushing
+    begin
+      IFID_inst <= #`simdelay 32'b0;
+      IFID_pc <= #`simdelay 32'b0;
     end
     else
     begin
@@ -427,10 +432,30 @@ module datapath(input         clk, reset,
     .rs1_data	(rfrs1_data),
     .rs2_data	(rfrs2_data));
 
+  // [Seunggi Moon] Edit: Forwarding Unit
+  always @(*)
+  begin
+    // if current rs1 == previous rd (!= zero), and previous instr didn't write anything to memory
+    if      ((IDEX_rd != 5'b0) && (rs1 == IDEX_rd) & ~IDEX_memwrite)                   rs1_data = aluout; 
+    else if ((EXMEM_rd != 5'b0) && (rs1 == EXMEM_rd) && (EXMEM_opcode == `OP_I_LOAD))  rs1_data = MemRdata[31:0];
+    else if ((EXMEM_rd != 5'b0) && (rs1 == EXMEM_rd) && (EXMEM_opcode != `OP_I_LOAD))  rs1_data = EXMEM_aluout[31:0];
+    else if ((MEMWB_rd != 5'b0) && (rs1 == MEMWB_rd))                                  rs1_data = rd_data[31:0];
+    else                                                                            	 rs1_data = rfrs1_data;
+  end
+  always @(*)
+  begin
+    // if current rs2 == previous rd (!= zero), and previous instr didn't write anything to memory
+    if      ((IDEX_rd != 5'b0) && (rs2 == IDEX_rd) & ~IDEX_memwrite)                   rs2_data = aluout; 
+    else if ((EXMEM_rd != 5'b0) && (rs2 == EXMEM_rd) && (EXMEM_opcode == `OP_I_LOAD))  rs2_data = MemRdata[31:0];
+    else if ((EXMEM_rd != 5'b0) && (rs2 == EXMEM_rd) && (EXMEM_opcode != `OP_I_LOAD))  rs2_data = EXMEM_aluout[31:0];
+    else if ((MEMWB_rd != 5'b0) && (rs2 == MEMWB_rd))                                  rs2_data = rd_data[31:0];
+    else                                                                            	 rs2_data = rfrs2_data;
+  end
+
   // [Seunggi Moon] Edit: Pipeline register update logic (ID -> EX)
   always @(posedge clk)
   begin
-    if (stall) // Setting register values to zero to prevent executing same instr again
+    if (stall | flush) // Setting register values to zero to prevent executing same instr again
     begin
       IDEX_opcode <= #`simdelay 7'b0;
 
@@ -453,6 +478,8 @@ module datapath(input         clk, reset,
 
       IDEX_alusrc <= #`simdelay 1'b0;
       IDEX_alucontrol <= #`simdelay 5'b0;
+
+      IDEX_funct3 <= #`simdelay 3'b0;
     end
     else
     begin
@@ -484,6 +511,8 @@ module datapath(input         clk, reset,
 
       IDEX_alusrc <= #`simdelay alusrc;
       IDEX_alucontrol <= #`simdelay alucontrol;
+
+      IDEX_funct3 <= #`simdelay funct3;
     end
   end
 
@@ -494,26 +523,6 @@ module datapath(input         clk, reset,
   /////////////////////////////////////////
 	
   assign MemWdata = EXMEM_rs2_data;
-
-  // [Seunggi Moon] Edit: Forwarding Unit
-  always @(*)
-  begin
-    // if current rs1 == previous rd (!= zero), and previous instr didn't write anything to memory
-    if      ((IDEX_rd != 5'b0) && (rs1 == IDEX_rd) & ~IDEX_memwrite)                   rs1_data = aluout; 
-    else if ((EXMEM_rd != 5'b0) && (rs1 == EXMEM_rd) && (EXMEM_opcode == `OP_I_LOAD))  rs1_data = MemRdata[31:0];
-    else if ((EXMEM_rd != 5'b0) && (rs1 == EXMEM_rd) && (EXMEM_opcode != `OP_I_LOAD))  rs1_data = EXMEM_aluout[31:0];
-    else if ((MEMWB_rd != 5'b0) && (rs1 == MEMWB_rd))                                  rs1_data = rd_data[31:0];
-    else                                                                            	rs1_data = rfrs1_data;
-  end
-  always @(*)
-  begin
-    // if current rs2 == previous rd (!= zero), and previous instr didn't write anything to memory
-    if      ((IDEX_rd != 5'b0) && (rs2 == IDEX_rd) & ~IDEX_memwrite)                   rs2_data = aluout; 
-    else if ((EXMEM_rd != 5'b0) && (rs2 == EXMEM_rd) && (EXMEM_opcode == `OP_I_LOAD))  rs2_data = MemRdata[31:0];
-    else if ((EXMEM_rd != 5'b0) && (rs2 == EXMEM_rd) && (EXMEM_opcode != `OP_I_LOAD))  rs2_data = EXMEM_aluout[31:0];
-    else if ((MEMWB_rd != 5'b0) && (rs2 == MEMWB_rd))                                  rs2_data = rd_data[31:0];
-    else                                                                            	rs2_data = rfrs2_data;
-  end
   
   // 1st source to ALU (alusrc1)
 	always@(*)
@@ -554,6 +563,24 @@ module datapath(input         clk, reset,
 		.Z			(Zflag),
 		.C			(Cflag),
 		.V			(Vflag));
+
+  // [Seunggi Moon] Edit: Implement stall logic (Data hazard detection)
+  assign stall = ((rs1 == IDEX_rd) && (IDEX_opcode == `OP_I_LOAD) && (IDEX_rd != 5'b00000))
+               + ((rs2 == IDEX_rd) && (IDEX_opcode == `OP_I_LOAD) && (IDEX_rd != 5'b00000));
+  
+  // [Seunggi Moon] Edit: use IDEX_funct3 instead of funct3
+  assign f3beq  = (IDEX_funct3 == 3'b000);
+  assign f3blt  = (IDEX_funct3 == 3'b100);
+  assign f3bgeu = (IDEX_funct3 == 3'b111); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BGEU
+  assign f3bne  = (IDEX_funct3 == 3'b001); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BNE
+
+  assign beq_taken  =  IDEX_branch & f3beq & Zflag;
+  assign blt_taken  =  IDEX_branch & f3blt & (Nflag != Vflag);
+  assign bgeu_taken =  IDEX_branch & f3bgeu & Cflag; // [Seunggi Moon] Edit: to detect whether the condition of BGEU is met
+  assign bne_taken  =  IDEX_branch & f3bne & ~Zflag; // [Seunggi Moon] Edit: to detect whether the condition of BNE is met
+
+  // [Seunggi Moon] Edit: Implement flush logic (Control hazard detection)
+  assign flush = (beq_taken | blt_taken | bgeu_taken | bne_taken | IDEX_jal | IDEX_jalr);
 
   // [Seunggi Moon] Edit: Pipeline register update logic (EX -> MEM)
   always@(posedge clk)
