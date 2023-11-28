@@ -279,9 +279,11 @@ module datapath(input         clk, reset,
   reg  [31:0] alusrc2;
   wire [31:0] branch_dest, jal_dest, jalr_dest; // [Seunggi Moon] Edit: Add jalr destination
   wire		    Nflag, Zflag, Cflag, Vflag;
-  wire		    f3beq, f3blt, f3bgeu, f3bne; // [Seunggi Moon] Edit: Add additional wire for bgeu, bne
+  wire		    f3beq, f3blt, f3bltu, f3bge, f3bgeu, f3bne; // [Seunggi Moon] Edit: Add additional wire for bgeu, bne, bltu, bge
   wire		    beq_taken;
   wire		    blt_taken;
+  wire		    bltu_taken; // [Seunggi Moon] Edit: Add bltu_taken
+  wire		    bge_taken; // [Seunggi Moon] Edit: Add bge_taken
   wire		    bgeu_taken; // [Seunggi Moon] Edit: Add bgeu_taken
   wire		    bne_taken; // [Seunggi Moon] Edit: Add bne_taken
 
@@ -362,8 +364,8 @@ module datapath(input         clk, reset,
 	  begin
       if (stall) // [Seunggi Moon] Edit: add stall condition
         pc <= #`simdelay pc;
-      // [Seunggi Moon] Edit: add condition for bgeu, use EX stage registers
-	    else if (beq_taken | blt_taken | bgeu_taken | bne_taken) // branch_taken
+      // [Seunggi Moon] Edit: add condition for bge, bgeu, bltu, use EX stage registers
+	    else if (beq_taken | blt_taken | bltu_taken | bge_taken | bgeu_taken | bne_taken) // branch_taken
 				pc <= #`simdelay branch_dest;
 		  else if (IDEX_jal) // jal
 				pc <= #`simdelay jal_dest;
@@ -570,16 +572,20 @@ module datapath(input         clk, reset,
   // [Seunggi Moon] Edit: use IDEX_funct3 instead of funct3
   assign f3beq  = (IDEX_funct3 == 3'b000);
   assign f3blt  = (IDEX_funct3 == 3'b100);
+  assign f3bltu  = (IDEX_funct3 == 3'b110); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BLTU
+  assign f3bge = (IDEX_funct3 == 3'b101); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BGE
   assign f3bgeu = (IDEX_funct3 == 3'b111); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BGEU
   assign f3bne  = (IDEX_funct3 == 3'b001); // [Seunggi Moon] Edit: to detect whether IDEX_funct3 is BNE
 
   assign beq_taken  =  IDEX_branch & f3beq & Zflag;
   assign blt_taken  =  IDEX_branch & f3blt & (Nflag != Vflag);
+  assign bltu_taken =  IDEX_branch & f3bltu & ~Cflag; // [Seunggi Moon] Edit: to detect whether the condition of BLTU is met
+  assign bge_taken =  IDEX_branch & f3bge & (Nflag == Vflag); // [Seunggi Moon] Edit: to detect whether the condition of BGE is met
   assign bgeu_taken =  IDEX_branch & f3bgeu & Cflag; // [Seunggi Moon] Edit: to detect whether the condition of BGEU is met
   assign bne_taken  =  IDEX_branch & f3bne & ~Zflag; // [Seunggi Moon] Edit: to detect whether the condition of BNE is met
 
   // [Seunggi Moon] Edit: Implement flush logic (Control hazard detection)
-  assign flush = (beq_taken | blt_taken | bgeu_taken | bne_taken | IDEX_jal | IDEX_jalr);
+  assign flush = (beq_taken | blt_taken | bltu_taken | bge_taken | bgeu_taken | bne_taken | IDEX_jal | IDEX_jalr);
 
   // [Seunggi Moon] Edit: Pipeline register update logic (EX -> MEM)
   always@(posedge clk)
