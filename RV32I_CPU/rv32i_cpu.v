@@ -305,7 +305,6 @@ module datapath(input         clk, reset,
   reg  [4:0]  IDEX_rd;
   reg  [2:0]  IDEX_funct3;
   reg         IDEX_auipc, IDEX_lui, IDEX_alusrc, IDEX_branch, IDEX_jal, IDEX_jalr;
-  reg         IDEX_beq_taken, IDEX_blt_taken, IDEX_bgeu_taken, IDEX_bne_taken; // [Seunggi Moon] Edit: For detecting control hazard
   reg         IDEX_memtoreg;
   reg         IDEX_memwrite;
   reg         IDEX_regwrite;
@@ -364,7 +363,7 @@ module datapath(input         clk, reset,
       if (stall) // [Seunggi Moon] Edit: add stall condition
         pc <= #`simdelay pc;
       // [Seunggi Moon] Edit: add condition for bgeu, use EX stage registers
-	    else if (IDEX_beq_taken | IDEX_blt_taken | IDEX_bgeu_taken | IDEX_bne_taken) // branch_taken
+	    else if (beq_taken | blt_taken | bgeu_taken | bne_taken) // branch_taken
 				pc <= #`simdelay branch_dest;
 		  else if (IDEX_jal) // jal
 				pc <= #`simdelay jal_dest;
